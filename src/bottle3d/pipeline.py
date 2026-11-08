@@ -15,6 +15,7 @@ from bottle3d.geometry.calibrate import Calibration, calibrate
 from bottle3d.geometry.contour import Contour, extract_contour, in_bbox, select_segments
 from bottle3d.geometry.wall import WallResult, solve_wall
 from bottle3d.pdf.vectors import PageVectors, extract, find_vertical_axes
+from bottle3d.spec.extract_rules import read_dimensions, read_lines, read_stamp
 from bottle3d.spec.schema import Job
 
 
@@ -106,18 +107,40 @@ def resolve_job(vectors: PageVectors, job: Job) -> tuple[Job, list[str]]:
     return j, auto
 
 
-def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
-    pdf = Path(pdf)
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
+def _analyze(pdf: Path, job: Job) -> tuple[Job, list[str], PageVectors, Contour]:
+    """Vectors → axis/view/width (guessed where empty) → contour → spec read from the text."""
     vectors = extract(pdf, job.page)
     if not vectors.segments:
         raise ValueError("в PDF нет векторной графики: похоже на скан")
     job, auto = resolve_job(vectors, job)
-
     segs = select_segments(vectors, job.view_bbox_mm, job.contour_width_pt)
     contour = extract_contour(segs, job.axis_x_mm)
+
+    lines = read_lines(pdf, job.page)
+    found: dict[str, object] = {**read_stamp(lines)}
+    found.update(read_dimensions(lines, contour, job.view_bbox_mm, vectors.height_mm))
+    # What the person typed (set fields) always wins over what was read from the drawing.
+    missing = {k: v for k, v in found.items() if getattr(job.spec, k) is None}
+    if missing:
+        job = job.model_copy(update={"spec": job.spec.model_copy(update=missing)})
+        auto += [f"spec.{k}" for k in missing]
+    return job, auto, vectors, contour
+
+
+def prefill(pdf: str | Path, job: Job | None = None) -> tuple[Job, list[str]]:
+    """Job with everything that can be read from the drawing filled in, and what was filled.
+
+    Used by the window right after a PDF is dropped, so the form is populated before building.
+    """
+    job, auto, _, _ = _analyze(Path(pdf), job or Job())
+    return job, auto
+
+
+def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
+    pdf = Path(pdf)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    job, auto, vectors, contour = _analyze(pdf, job)
 
     sp = job.spec
     cal = calibrate(
@@ -148,7 +171,14 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
         )
     notes = []
     if auto:
-        notes.append("определено автоматически, проверьте контур на картинке: " + ", ".join(auto))
+        geo = [a for a in auto if not a.startswith("spec.")]
+        spec = [a.removeprefix("spec.") for a in auto if a.startswith("spec.")]
+        if geo:
+            notes.append(
+                "определено автоматически, проверьте контур на картинке: " + ", ".join(geo)
+            )
+        if spec:
+            notes.append("прочитано с чертежа, сверьте со штампом: " + ", ".join(spec))
     notes.append("не моделируется: пунт (вогнутость дна), гравировка, пупырышки, dot code")
     result = Result(job, contour, cal, wall, auto, problems, notes)
 

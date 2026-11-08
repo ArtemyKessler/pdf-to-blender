@@ -30,6 +30,11 @@ def test_drop_fill_and_build_without_blender(window, qtbot, tmp_path, monkeypatc
     pdf.write_bytes(PDF.read_bytes())
     window.load_pdf(pdf)
     assert window.build_btn.isEnabled()
+    # The stamp and dimensions are read from the drawing as soon as it is dropped.
+    assert window.fields["glass_weight_g"].text() == "500"
+    assert window.fields["body_diameter_mm"].text() == "88.3"
+    assert window.colour.currentText() == "Flint"
+    assert window.fields["glass_weight_g"].styleSheet()  # framed as auto-filled
 
     for key, value in {
         "overall_height_mm": "246",
