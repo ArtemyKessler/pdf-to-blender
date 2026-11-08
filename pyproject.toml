@@ -1,0 +1,40 @@
+[project]
+name = "bottle3d"
+version = "0.1.0"
+description = "PDF drawing of glass bottle -> revolved 3D model for Blender"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "pydantic>=2.14.3",
+    "pymupdf>=2.1",
+    "pyyaml>=6.0.3",
+    "shapely>=2.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[project.scripts]
+bottle3d = "bottle3d.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"blender/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["blender: needs Blender (bpy or blender executable)"]
