@@ -63,3 +63,14 @@ def test_mesh_with_punt_is_manifold(synthetic, tmp_path):
     stats = _build(tmp_path / "profile.json", tmp_path)
     assert stats["non_manifold_edges"] == 0
     assert stats["volume_cm3"] == pytest.approx(r.wall.v_glass, rel=0.01)
+
+
+def test_reference_with_punt_and_engravings(tmp_path):
+    from tests.test_reference import PDF, SPEC
+
+    r = pipeline.run(PDF, Job(spec=SPEC), tmp_path)
+    stats = _build(tmp_path / "profile.json", tmp_path)
+    assert stats["engravings"] == 2
+    assert stats["non_manifold_edges"] == 0
+    # The lettering adds well under 1 cm³ of glass.
+    assert r.wall.v_glass < stats["volume_cm3"] < r.wall.v_glass + 1

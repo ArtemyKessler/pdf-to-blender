@@ -44,6 +44,7 @@ class Job(BaseModel):
         None, description="height of the dome in the base; None = find on the drawing, 0 = flat"
     )
     punt_diameter_mm: float | None = Field(None, description="dome diameter at the base line")
+    engraving: bool = Field(True, description="add the raised engravings found on the drawing")
     spec: BottleSpec = Field(default_factory=BottleSpec)
 
     @classmethod
