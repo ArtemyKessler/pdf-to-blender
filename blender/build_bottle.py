@@ -69,6 +69,87 @@ def build_mesh(section: list[list[float]], steps: int = STEPS) -> bpy.types.Obje
     return obj
 
 
+def _wrap(verts_uvw, side: list[list[float]], z_center: float, angle: float):
+    """Map flat (u, v, w) onto the outer surface: u around the bottle, v along its side from
+    the point at height `z_center`, w outwards along the surface normal."""
+    rs = [p[0] for p in side]
+    zs = [p[1] for p in side]
+    s = [0.0]
+    for i in range(1, len(side)):
+        s.append(s[-1] + math.hypot(rs[i] - rs[i - 1], zs[i] - zs[i - 1]))
+
+    def at(arc: float):
+        arc = min(max(arc, 0.0), s[-1])
+        i = max(1, min(len(s) - 1, next((k for k in range(1, len(s)) if s[k] >= arc), len(s) - 1)))
+        ds = s[i] - s[i - 1] or 1e-12
+        t = (arc - s[i - 1]) / ds
+        r = rs[i - 1] + t * (rs[i] - rs[i - 1])
+        z = zs[i - 1] + t * (zs[i] - zs[i - 1])
+        return r, z, (zs[i] - zs[i - 1]) / ds, -(rs[i] - rs[i - 1]) / ds
+
+    # Arc length at the centre height (the side profile goes up monotonically).
+    k = next((k for k in range(1, len(zs)) if zs[k] >= z_center), len(zs) - 1)
+    dz = zs[k] - zs[k - 1] or 1e-12
+    s_c = s[k - 1] + (s[k] - s[k - 1]) * (z_center - zs[k - 1]) / dz
+    out = []
+    for u, v, w in verts_uvw:
+        r, z, nr, nz = at(s_c + v)
+        theta = angle + u / max(r, 1e-6)
+        rr = r + w * nr
+        out.append((rr * math.cos(theta), rr * math.sin(theta), z + w * nz))
+    return out
+
+
+def build_engraving(e: dict, side: list[list[float]], sink: float = 0.0002) -> bpy.types.Object:
+    """Raised lettering: the flat outline extruded by its relief, sunk slightly into the glass
+    so that the union with the bottle is clean, then wrapped onto the surface."""
+    bm = bmesh.new()
+    verts = [bm.verts.new((u, v, -sink)) for u, v in e["verts"]]
+    for f in e["faces"]:
+        try:
+            bm.faces.new([verts[i] for i in f])
+        except ValueError:  # duplicate face
+            pass
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-8)
+    res = bmesh.ops.extrude_face_region(bm, geom=bm.faces[:])
+    top = [g for g in res["geom"] if isinstance(g, bmesh.types.BMVert)]
+    for vtx in top:
+        vtx.co.z = e["relief"]
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.verts.ensure_lookup_table()
+    mapped = _wrap(
+        [tuple(v.co) for v in bm.verts], side, e["z_center"], math.radians(e["angle_deg"])
+    )
+    for vtx, co in zip(bm.verts, mapped):
+        vtx.co = co
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    mesh = bpy.data.meshes.new("Engraving")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new("Engraving", mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def add_engravings(bottle: bpy.types.Object, profile: dict) -> int:
+    """Union the engravings into the bottle. Returns how many were added."""
+    side = profile.get("outer_side") or []
+    n = 0
+    for e in profile.get("engravings", []):
+        if not e.get("faces") or len(side) < 2:
+            continue
+        eng = build_engraving(e, side)
+        mod = bottle.modifiers.new("Engraving", "BOOLEAN")
+        mod.operation = "UNION"
+        mod.solver = "EXACT"
+        mod.object = eng
+        bpy.context.view_layer.objects.active = bottle
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        bpy.data.objects.remove(eng, do_unlink=True)
+        n += 1
+    return n
+
+
 def mesh_stats(obj: bpy.types.Object) -> dict:
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -183,8 +264,10 @@ def build(
 
     scene = reset_scene()
     obj = build_mesh(profile["section"])
+    n_engr = add_engravings(obj, profile)
     obj.data.materials.append(glass_material(profile.get("material", {}).get("glass_colour")))
     stats = mesh_stats(obj)
+    stats["engravings"] = n_engr
     (out_dir / "blender_stats.json").write_text(json.dumps(stats, indent=1), encoding="utf-8")
 
     if glb:
