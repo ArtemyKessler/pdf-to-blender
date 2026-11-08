@@ -88,8 +88,12 @@ def resolve_job(vectors: PageVectors, job: Job) -> tuple[Job, list[str]]:
     j = job.model_copy(deep=True)
     axes = find_vertical_axes(vectors)
     if j.axis_x_mm is None:
+        if j.view_bbox_mm is not None:  # the person framed a view: its own axis
+            x0, _, x1, _ = j.view_bbox_mm
+            axes = [a for a in axes if x0 < a[0] < x1] or axes
+            axes.sort(key=lambda a: abs(a[0] - (x0 + x1) / 2))
         if not axes:
-            raise ValueError("не найдена ось симметрии: задайте axis_x_mm в job.yaml")
+            raise ValueError("не найдена ось симметрии: укажите ось вручную")
         j.axis_x_mm = round(axes[0][0], 3)
         auto.append("axis_x_mm")
     if j.view_bbox_mm is None:
@@ -107,40 +111,72 @@ def resolve_job(vectors: PageVectors, job: Job) -> tuple[Job, list[str]]:
     return j, auto
 
 
-def _analyze(pdf: Path, job: Job) -> tuple[Job, list[str], PageVectors, Contour]:
-    """Vectors → axis/view/width (guessed where empty) → contour → spec read from the text."""
-    vectors = extract(pdf, job.page)
+@dataclass
+class Analysis:
+    """Everything known about a drawing before building: the GUI shows it and lets a person
+    correct axis, view and line width; `run` builds from it."""
+
+    job: Job
+    auto: list[str]
+    vectors: PageVectors
+    contour: Contour
+
+
+def analyze(
+    pdf: str | Path,
+    job: Job,
+    *,
+    vectors: PageVectors | None = None,
+    read_spec: bool = True,
+) -> Analysis:
+    """Vectors → axis/view/width (guessed where empty) → contour → spec read from the text.
+
+    Pass `vectors` from a previous call to skip re-reading the PDF (interactive corrections).
+    """
+    pdf = Path(pdf)
+    if vectors is None:
+        vectors = extract(pdf, job.page)
     if not vectors.segments:
         raise ValueError("в PDF нет векторной графики: похоже на скан")
     job, auto = resolve_job(vectors, job)
     segs = select_segments(vectors, job.view_bbox_mm, job.contour_width_pt)
     contour = extract_contour(segs, job.axis_x_mm)
 
-    lines = read_lines(pdf, job.page)
-    found: dict[str, object] = {**read_stamp(lines)}
-    found.update(read_dimensions(lines, contour, job.view_bbox_mm, vectors.height_mm))
-    # What the person typed (set fields) always wins over what was read from the drawing.
-    missing = {k: v for k, v in found.items() if getattr(job.spec, k) is None}
-    if missing:
-        job = job.model_copy(update={"spec": job.spec.model_copy(update=missing)})
-        auto += [f"spec.{k}" for k in missing]
-    return job, auto, vectors, contour
+    if read_spec:
+        lines = read_lines(pdf, job.page)
+        found: dict[str, object] = {**read_stamp(lines)}
+        found.update(read_dimensions(lines, contour, job.view_bbox_mm, vectors.height_mm))
+        # What the person typed (set fields) always wins over what was read from the drawing.
+        missing = {k: v for k, v in found.items() if getattr(job.spec, k) is None}
+        if missing:
+            job = job.model_copy(update={"spec": job.spec.model_copy(update=missing)})
+            auto += [f"spec.{k}" for k in missing]
+    return Analysis(job, auto, vectors, contour)
+
+
+def line_widths(vectors: PageVectors, bbox) -> list[tuple[float, float]]:
+    """(line width in pt, total drawn length in mm) inside the box, longest first."""
+    lengths: dict[float, float] = {}
+    for s in vectors.segments:
+        if s.dashed or s.width_pt <= 0 or not in_bbox(s, bbox):
+            continue
+        w = round(s.width_pt, 2)
+        lengths[w] = lengths.get(w, 0.0) + _seg_len(s)
+    return sorted(lengths.items(), key=lambda t: -t[1])
 
 
 def prefill(pdf: str | Path, job: Job | None = None) -> tuple[Job, list[str]]:
-    """Job with everything that can be read from the drawing filled in, and what was filled.
-
-    Used by the window right after a PDF is dropped, so the form is populated before building.
-    """
-    job, auto, _, _ = _analyze(Path(pdf), job or Job())
-    return job, auto
+    """Job with everything that can be read from the drawing filled in, and what was filled."""
+    a = analyze(pdf, job or Job())
+    return a.job, a.auto
 
 
 def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
     pdf = Path(pdf)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    job, auto, vectors, contour = _analyze(pdf, job)
+    a = analyze(pdf, job)
+    job, auto, vectors, contour = a.job, a.auto, a.vectors, a.contour
 
     sp = job.spec
     cal = calibrate(

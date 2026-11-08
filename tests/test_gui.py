@@ -78,3 +78,61 @@ def test_bad_number_is_rejected(window, tmp_path, monkeypatch):
     window.fields["glass_weight_g"].setText("пятьсот")
     with pytest.raises(ValueError):
         window.read_form()
+
+
+def test_contour_is_shown_and_can_be_corrected(window, tmp_path):
+    pdf = tmp_path / "b.pdf"
+    pdf.write_bytes(PDF.read_bytes())
+    window.load_pdf(pdf)
+    a = window.analysis
+    assert a is not None and a.contour.height == pytest.approx(250.6, abs=0.5)
+    assert "найдено автоматически: ось, вид" in window.contour_info.text().lower()
+    assert window.width_box.currentData() == pytest.approx(0.84)
+
+    # Frame the BOTTOM VIEW instead: the axis inside it is taken, the contour is rebuilt.
+    window.on_view_picked((60.0, 20.0, 175.0, 140.0))
+    assert window.job.view_bbox_mm == (60.0, 20.0, 175.0, 140.0)
+    assert window.analysis.contour.height < 120
+    assert "задано вручную: вид" in window.contour_info.text().lower()
+
+    # A wrong axis gives an asymmetric outline and a warning.
+    window.reset_geometry()
+    window.on_axis_picked(125.0)
+    assert window.job.axis_x_mm == 125.0
+    assert "подозрительно" in window.contour_info.text().lower()
+
+    # Reset brings back the automatic front view, and the dimensions read for it.
+    window.reset_geometry()
+    assert window.job.axis_x_mm == pytest.approx(117.2, abs=0.1)
+    assert window.analysis.contour.height == pytest.approx(250.6, abs=0.5)
+    assert window.fields["body_diameter_mm"].text() == "88.3"
+
+
+def test_choosing_a_line_width_rebuilds_the_contour(window, tmp_path):
+    pdf = tmp_path / "b.pdf"
+    pdf.write_bytes(PDF.read_bytes())
+    window.load_pdf(pdf)
+    i = next(
+        i
+        for i in range(window.width_box.count())
+        if abs(window.width_box.itemData(i) - 0.72) < 1e-3
+    )
+    window.on_width_chosen(i)
+    assert window.job.contour_width_pt == pytest.approx(0.72)
+    assert "contour_width_pt" in window.manual_geo
+
+
+def test_corrections_are_saved_next_to_the_drawing(window, tmp_path, monkeypatch):
+    pdf = tmp_path / "b.pdf"
+    pdf.write_bytes(PDF.read_bytes())
+    window.load_pdf(pdf)
+    window.on_axis_picked(117.18)
+    window.out = tmp_path / "out"
+    window.out.mkdir()
+    monkeypatch.setattr(
+        "bottle3d.gui.main.QFileDialog.getExistingDirectory", lambda *a, **k: str(tmp_path)
+    )
+    window.save()
+    window.load_pdf(pdf)
+    assert window.job.axis_x_mm == 117.18
+    assert "axis_x_mm" in window.manual_geo
