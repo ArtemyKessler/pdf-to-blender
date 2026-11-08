@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.4.6",
     "pydantic>=2.14.3",
     "pymupdf>=2.1",
+    "pyside6>=6.12.0",
     "pyyaml>=6.0.3",
     "shapely>=2.2.0",
 ]
@@ -18,12 +19,17 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.22.3",
     "pytest>=9.2.0",
+    "pytest-qt>=4.5.0",
     "ruff>=0.17.4",
 ]
 
 [project.scripts]
 bottle3d = "bottle3d.cli:main"
+
+[project.gui-scripts]
+bottle3d-gui = "bottle3d.gui.main:main"
 
 [tool.ruff]
 line-length = 100

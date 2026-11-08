@@ -6,9 +6,22 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[2] / "blender" / "build_bottle.py"
+
+def _scripts_dir() -> Path:
+    # PyInstaller unpacks data files to sys._MEIPASS; from a checkout they live next to src/.
+    frozen = getattr(sys, "_MEIPASS", None)
+    if frozen:
+        return Path(frozen) / "blender"
+    return Path(__file__).resolve().parents[2] / "blender"
+
+
+SCRIPT = _scripts_dir() / "build_bottle.py"
+# Do not flash a console window for every Blender call from the desktop app.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def candidates() -> list[Path]:
@@ -35,6 +48,7 @@ def version(exe: Path) -> tuple[int, int] | None:
             capture_output=True,
             text=True,
             timeout=60,
+            creationflags=_NO_WINDOW,
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -43,7 +57,7 @@ def version(exe: Path) -> tuple[int, int] | None:
 
 
 def find_blender(explicit: str | Path | None = None) -> Path:
-    options = [Path(explicit)] if explicit else candidates()
+    options = ([Path(explicit)] if explicit else []) + candidates()
     for exe in options:
         v = version(exe)
         if v and v >= (4, 2):
@@ -64,7 +78,9 @@ def build(
     engine: str = "CYCLES",
     samples: int = 64,
     timeout: int = 900,
+    cancel: threading.Event | None = None,
 ) -> Path:
+    """Run the Blender script. `cancel`, when set from another thread, stops Blender."""
     exe = find_blender(blender)
     args = [
         str(exe),
@@ -88,7 +104,20 @@ def build(
         args.append("--glb")
     log = out_dir / "blender.log"
     with open(log, "w", encoding="utf-8") as f:
-        proc = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
+        proc = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT, creationflags=_NO_WINDOW)
+        waited = 0.0
+        while True:
+            try:
+                proc.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                waited += 0.5
+                if (cancel is not None and cancel.is_set()) or waited > timeout:
+                    proc.kill()
+                    proc.wait()
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("остановлено пользователем") from None
+                    raise TimeoutError(f"Blender не уложился в {timeout} с") from None
     if proc.returncode != 0:
         raise RuntimeError(f"Blender завершился с ошибкой, подробности в {log}")
     return out_dir / "model.blend"
