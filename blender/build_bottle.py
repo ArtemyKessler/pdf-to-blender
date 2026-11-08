@@ -120,7 +120,7 @@ def build_engraving(e: dict, side: list[list[float]], sink: float = 0.0002) -> b
     mapped = _wrap(
         [tuple(v.co) for v in bm.verts], side, e["z_center"], math.radians(e["angle_deg"])
     )
-    for vtx, co in zip(bm.verts, mapped):
+    for vtx, co in zip(bm.verts, mapped, strict=True):
         vtx.co = co
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     mesh = bpy.data.meshes.new("Engraving")
