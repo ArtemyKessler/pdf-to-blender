@@ -36,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Статус: {res.status}")
     for p in res.problems:
         print(f"  - {p}")
+    for n in res.notes:
+        print(f"  * {n}")
     print(f"Отчёт: {a.out / 'report.md'}, наложение: {a.out / 'debug.png'}")
 
     if not a.no_blender:
