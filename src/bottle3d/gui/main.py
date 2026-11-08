@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from bottle3d import __version__, blender_runner, pipeline
+from bottle3d.gui.drawing_view import DrawingView
+from bottle3d.pdf.vectors import extract
 from bottle3d.spec.schema import BottleSpec, Job
 
 # (field, label) for the numeric part of the stamp shown in the form.
@@ -172,6 +174,9 @@ class MainWindow(QMainWindow):
         self.out: Path | None = None
         self.result: pipeline.Result | None = None
         self.job = Job()
+        self.analysis: pipeline.Analysis | None = None
+        self.auto_spec: set[str] = set()  # fields read from the drawing and not edited since
+        self.manual_geo: set[str] = set()  # axis / view / width set by the person
         self._thread: QThread | None = None
         self._worker: Worker | None = None
 
@@ -193,7 +198,7 @@ class MainWindow(QMainWindow):
         for key, label in SPEC_FIELDS:
             edit = QLineEdit()
             edit.setPlaceholderText("не указано")
-            edit.textEdited.connect(lambda _t, w=edit: (w.setStyleSheet(""), w.setToolTip("")))
+            edit.textEdited.connect(lambda _t, k=key: self.unmark(k))
             self.fields[key] = edit
             form.addRow(label, edit)
         self.colour = QComboBox()
@@ -250,12 +255,12 @@ class MainWindow(QMainWindow):
 
         # Right panel: what the person checks.
         self.tabs = QTabWidget()
-        self.contour_view = ImageView("Здесь появится чертёж с найденным контуром.")
+        self.contour_tab = self._build_contour_tab()
         self.render_view = ImageView("Здесь появится рендер.")
         self.report = QTextBrowser()
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.tabs.addTab(self.contour_view, "Контур")
+        self.tabs.addTab(self.contour_tab, "Контур")
         self.tabs.addTab(self.render_view, "Рендер")
         self.tabs.addTab(self.report, "Отчёт")
         self.tabs.addTab(self.log, "Журнал")
@@ -289,6 +294,50 @@ class MainWindow(QMainWindow):
         if name:
             self.load_pdf(Path(name))
 
+    def _build_contour_tab(self) -> QWidget:
+        self.drawing = DrawingView()
+        self.drawing.axis_picked.connect(self.on_axis_picked)
+        self.drawing.view_picked.connect(self.on_view_picked)
+        self.axis_btn = QPushButton("Указать ось")
+        self.axis_btn.setToolTip("Затем щёлкните по оси симметрии главного вида")
+        self.axis_btn.clicked.connect(lambda: self.pick("axis"))
+        self.view_btn = QPushButton("Выделить вид")
+        self.view_btn.setToolTip("Затем обведите рамкой главный вид бутылки")
+        self.view_btn.clicked.connect(lambda: self.pick("view"))
+        self.width_box = QComboBox()
+        self.width_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.width_box.setToolTip("Толщина линий контура (в скобках — суммарная длина в виде)")
+        self.width_box.activated.connect(self.on_width_chosen)
+        self.reset_btn = QPushButton("Сбросить")
+        self.reset_btn.setToolTip("Вернуть автоопределение оси, вида и толщины")
+        self.reset_btn.clicked.connect(self.reset_geometry)
+        fit_btn = QPushButton("Весь лист")
+        fit_btn.clicked.connect(self.drawing.fit_page)
+        for b in (self.axis_btn, self.view_btn, self.reset_btn):
+            b.setEnabled(False)
+        self.width_box.setEnabled(False)
+        bar = QHBoxLayout()
+        bar.addWidget(self.axis_btn)
+        bar.addWidget(self.view_btn)
+        bar.addWidget(QLabel("Контур:"))
+        bar.addWidget(self.width_box)
+        bar.addWidget(self.reset_btn)
+        bar.addStretch(1)
+        bar.addWidget(fit_btn)
+        self.contour_info = QLabel(
+            "Перетащите PDF в окно. Зелёная линия — ось, синяя рамка — главный вид, "
+            "красная — найденный контур."
+        )
+        self.contour_info.setWordWrap(True)
+        lay = QVBoxLayout()
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.addLayout(bar)
+        lay.addWidget(self.drawing, 1)
+        lay.addWidget(self.contour_info)
+        w = QWidget()
+        w.setLayout(lay)
+        return w
+
     def load_pdf(self, pdf: Path) -> None:
         self.pdf = pdf
         self.settings.setValue("last_dir", str(pdf.parent))
@@ -298,37 +347,182 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             self.job = Job()
             self.append_log(f"Не удалось прочитать {saved.name}: {e}")
+        # Geometry saved next to the drawing was confirmed by a person before.
+        self.manual_geo = {
+            k for k in ("axis_x_mm", "view_bbox_mm", "contour_width_pt") if getattr(self.job, k)
+        }
+        self.analysis = None
+        self.auto_spec = set()
 
-        # Read the stamp and dimensions from the drawing; saved/typed values are kept.
-        filled: list[str] = []
+        # Read geometry, stamp and dimensions from the drawing; saved/typed values are kept.
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            self.job, auto = pipeline.prefill(pdf, self.job)
-            filled = [a.removeprefix("spec.") for a in auto if a.startswith("spec.")]
+            self.drawing.load_page(pdf, self.job.page)
+            vectors = extract(pdf, self.job.page)
+            self.reanalyze(vectors=vectors, read_spec=True)
         except Exception as e:  # noqa: BLE001 — the form stays editable by hand
-            self.append_log(f"Не удалось прочитать данные с чертежа: {e}")
+            self.append_log(f"Не удалось прочитать чертёж: {e}")
+            self.contour_info.setText(f"Не удалось разобрать чертёж: {e}")
         finally:
             QApplication.restoreOverrideCursor()
 
         self.fill_form(self.job)
-        self.mark_filled(filled)
+        self.mark_filled(sorted(self.auto_spec))
         self.drop.setText(pdf.name)
         self.build_btn.setEnabled(True)
-        self.contour_view.show_file(None)
+        for b in (self.axis_btn, self.view_btn, self.reset_btn):
+            b.setEnabled(True)
         self.render_view.show_file(None)
         self.report.clear()
+        self.tabs.setCurrentWidget(self.contour_tab)
         self.status.setStyleSheet("")
         parts = []
         if saved.exists():
             parts.append("Настройки загружены из " + saved.name + ".")
-        if filled:
+        if self.auto_spec:
             parts.append(
-                f"С чертежа прочитано полей: {len(filled)} (выделены рамкой). Сверьте со штампом."
+                f"С чертежа прочитано полей: {len(self.auto_spec)} (выделены рамкой). "
+                "Сверьте со штампом."
             )
         missing = [label for key, label in SPEC_FIELDS if not self.fields[key].text()]
         if missing:
             parts.append("Не найдено: " + ", ".join(m.split(",")[0] for m in missing) + ".")
         self.status.setText(" ".join(parts))
+
+    # ---- geometry corrections ------------------------------------------------------------
+
+    def reanalyze(self, *, vectors=None, read_spec: bool = True) -> None:
+        """Recompute axis/view/width (unless set by the person), contour and, for fields the
+        person has not touched, the values read from the drawing."""
+        if self.pdf is None:
+            return
+        if vectors is None and self.analysis is not None:
+            vectors = self.analysis.vectors
+        job = self.job
+        # Forget guesses so they are made again for the corrected geometry.
+        geo = {
+            k: None
+            for k in ("axis_x_mm", "view_bbox_mm", "contour_width_pt")
+            if k not in self.manual_geo
+        }
+        spec = {k: None for k in self.auto_spec}
+        job = job.model_copy(update={**geo, "spec": job.spec.model_copy(update=spec)})
+        try:
+            a = pipeline.analyze(self.pdf, job, vectors=vectors, read_spec=read_spec)
+        except Exception as e:  # noqa: BLE001
+            self.job = job
+            self.drawing.show_analysis(job.axis_x_mm, job.view_bbox_mm, None)
+            self.contour_info.setText(f"Контур не найден: {e}. Укажите ось и вид вручную.")
+            self.contour_info.setStyleSheet("color: #c62828;")
+            return
+        self.analysis = a
+        self.job = a.job
+        self.auto_spec = {x.removeprefix("spec.") for x in a.auto if x.startswith("spec.")}
+        self.drawing.show_analysis(a.job.axis_x_mm, a.job.view_bbox_mm, a.contour)
+        self.update_width_box()
+        self.update_contour_info()
+        self.after_reanalyze_form()
+
+    def update_width_box(self) -> None:
+        a = self.analysis
+        if a is None:
+            return
+        self.width_box.blockSignals(True)
+        self.width_box.clear()
+        widths = pipeline.line_widths(a.vectors, a.job.view_bbox_mm)
+        current = a.job.contour_width_pt
+        if current is not None and all(abs(w - current) > 0.005 for w, _ in widths):
+            widths.append((current, 0.0))
+        for w, length in widths:
+            self.width_box.addItem(f"{w:.2f} pt ({length:.0f} мм)", w)
+        idx = next((i for i, (w, _) in enumerate(widths) if abs(w - (current or 0)) < 0.005), 0)
+        self.width_box.setCurrentIndex(idx)
+        self.width_box.setEnabled(bool(widths))
+        self.width_box.blockSignals(False)
+
+    def update_contour_info(self) -> None:
+        a = self.analysis
+        if a is None:
+            return
+        c = a.contour
+        names = {"axis_x_mm": "ось", "view_bbox_mm": "вид", "contour_width_pt": "толщина линии"}
+        auto = [names[k] for k in names if k in a.auto]
+        manual = [names[k] for k in names if k not in a.auto]
+        how = []
+        if auto:
+            how.append("найдено автоматически: " + ", ".join(auto))
+        if manual:
+            how.append("задано вручную: " + ", ".join(manual))
+        text = (
+            "; ".join(how).capitalize() + f". Контур на листе: высота {c.height:.1f} мм, "
+            f"Ø {c.max_diameter:.1f} мм, разрыв {c.max_gap_mm:.2f} мм, "
+            f"асимметрия {c.symmetry_mm:.2f} мм."
+        )
+        bad = c.max_gap_mm > 0.1 or c.symmetry_mm > 0.3
+        if bad:
+            text += " Контур выглядит подозрительно: проверьте ось, рамку вида и толщину."
+        self.contour_info.setText(text)
+        self.contour_info.setStyleSheet("color: #b26a00;" if bad else "")
+
+    def pick(self, mode: str) -> None:
+        self.drawing.set_mode(mode)
+        self.tabs.setCurrentWidget(self.contour_tab)
+        self.contour_info.setText(
+            "Щёлкните по оси симметрии главного вида."
+            if mode == "axis"
+            else "Обведите рамкой главный вид бутылки (зажмите левую кнопку и тяните)."
+        )
+        self.contour_info.setStyleSheet("color: #1565c0;")
+
+    @Slot(float)
+    def on_axis_picked(self, x: float) -> None:
+        self.job = self.job.model_copy(update={"axis_x_mm": x})
+        self.manual_geo.add("axis_x_mm")
+        self.reanalyze(read_spec=True)
+
+    @Slot(tuple)
+    def on_view_picked(self, bbox: tuple) -> None:
+        update: dict[str, object] = {"view_bbox_mm": bbox}
+        self.manual_geo.add("view_bbox_mm")
+        # An axis outside the new box is wrong: let it be found again inside the box.
+        x0, _, x1, _ = bbox
+        if not (self.job.axis_x_mm and x0 < self.job.axis_x_mm < x1):
+            self.manual_geo.discard("axis_x_mm")
+            update["axis_x_mm"] = None
+        self.job = self.job.model_copy(update=update)
+        self.reanalyze(read_spec=True)
+
+    @Slot(int)
+    def on_width_chosen(self, index: int) -> None:
+        w = self.width_box.itemData(index)
+        if w is None:
+            return
+        self.job = self.job.model_copy(update={"contour_width_pt": float(w)})
+        self.manual_geo.add("contour_width_pt")
+        self.reanalyze(read_spec=True)
+
+    def reset_geometry(self) -> None:
+        self.manual_geo.clear()
+        self.job = self.job.model_copy(
+            update={"axis_x_mm": None, "view_bbox_mm": None, "contour_width_pt": None}
+        )
+        self.drawing._fitted = False
+        self.reanalyze(read_spec=True)
+
+    def after_reanalyze_form(self) -> None:
+        """Push values re-read from the drawing into fields the person has not edited."""
+        for key in self.auto_spec:
+            if key in self.fields:
+                v = getattr(self.job.spec, key)
+                self.fields[key].setText("" if v is None else f"{v:g}")
+        self.mark_filled(sorted(self.auto_spec))
+
+    def unmark(self, key: str) -> None:
+        self.auto_spec.discard(key)
+        w = self.fields.get(key)
+        if w is not None:
+            w.setStyleSheet("")
+            w.setToolTip("")
 
     def mark_filled(self, keys: list[str]) -> None:
         """Frame the fields that were read from the drawing until the person edits them."""
@@ -435,7 +629,7 @@ class MainWindow(QMainWindow):
         self.result = result
         self.job = result.job  # keep auto-detected axis/view so a re-run reproduces them
         assert self.out is not None
-        self.contour_view.show_file(self.out / "debug.png")
+        self.drawing.show_analysis(result.job.axis_x_mm, result.job.view_bbox_mm, result.contour)
         has_render = (self.out / "preview.png").exists()
         self.render_view.show_file(self.out / "preview.png" if has_render else None)
         self.report.setMarkdown((self.out / "report.md").read_text(encoding="utf-8"))
@@ -449,7 +643,7 @@ class MainWindow(QMainWindow):
             self.append_log(log.read_text(encoding="utf-8", errors="replace")[-4000:])
         self.status.setText(text)
         self.status.setStyleSheet("color: #2e7d32;" if ok and not warning else "color: #b26a00;")
-        self.tabs.setCurrentWidget(self.render_view if has_render else self.contour_view)
+        self.tabs.setCurrentWidget(self.render_view if has_render else self.contour_tab)
         self.save_btn.setEnabled(True)
         self.open_blend_btn.setEnabled((self.out / "model.blend").exists())
 
