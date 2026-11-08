@@ -3,6 +3,7 @@ import math
 import numpy as np
 import pytest
 
+from bottle3d.geometry.punt import apply_punt, punt_profile
 from bottle3d.geometry.wall import outer_section, revolve_volume_cm3, solve_wall
 from tests.synthetic.make_pdf import profile_polyline
 
@@ -42,3 +43,19 @@ def test_section_is_open_with_ends_on_axis():
 def test_outer_volume_check_flags_wrong_contour():
     w = solve_wall(profile_polyline(), glass_weight_g=500, brimful_ml=500)
     assert any("внешний объём" in p for p in w.problems)
+
+
+def test_punt_takes_its_dome_volume_off():
+    rz = np.array([[0, 0], [40, 0], [40, 100], [0, 100]], float)
+    flat = revolve_volume_cm3(outer_section(rz))
+    # Base line traced with rounding noise must still count as flat.
+    rz[1, 1] = 2e-8
+    with_punt = apply_punt(rz, depth=15, diameter=50)
+    # Half-ellipsoid dome: 2/3 π a² h.
+    dome = 2 / 3 * math.pi * 25**2 * 15 / 1000
+    assert revolve_volume_cm3(outer_section(with_punt)) == pytest.approx(flat - dome, rel=2e-3)
+
+
+def test_punt_profile_ends():
+    p = punt_profile(10, 40)
+    assert p[0] == pytest.approx([20, 0]) and p[-1] == pytest.approx([0, 10], abs=1e-9)

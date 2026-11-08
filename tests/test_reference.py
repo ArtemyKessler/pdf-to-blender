@@ -57,6 +57,30 @@ def test_dimensions_after_calibration(result):
 
 def test_volumes_match_the_stamp(result):
     w = result.wall
-    assert w.v_outer == pytest.approx(920, rel=0.03)  # brimful 720 + glass 200
+    # brimful 720 + glass 200; the punt takes ~20 ml off the outer volume.
+    assert w.v_outer == pytest.approx(920, rel=0.01)
     assert w.v_below_fill == pytest.approx(700, rel=0.02)
     assert 2.0 < w.wall_t < 4.5
+
+
+def test_punt_is_found_in_the_side_view(result):
+    j = result.job
+    # Dimensioned "20.0" on the drawing; the dashed dome sits in the LEFT VIEW.
+    assert j.punt_depth_mm == pytest.approx(20.0, abs=0.6)
+    assert j.punt_diameter_mm == pytest.approx(46, abs=2)
+    assert "punt" in result.auto
+    assert any("пунт найден" in n for n in result.notes)
+
+
+def test_inner_base_follows_the_punt(result):
+    s = result.wall.section
+    # Inner bottom on the axis: punt depth plus the base thickness.
+    assert s[0, 0] == 0
+    assert s[0, 1] == pytest.approx(result.job.punt_depth_mm + 10, abs=0.05)
+
+
+def test_flat_base_when_punt_is_switched_off(tmp_path):
+    r = pipeline.run(PDF, Job(spec=SPEC, punt_depth_mm=0), tmp_path)
+    assert "punt" not in r.auto
+    assert r.wall.section[0, 1] == pytest.approx(10)
+    assert r.wall.v_outer > 935  # the ~20 ml of the dome is back

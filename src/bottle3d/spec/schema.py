@@ -40,6 +40,10 @@ class Job(BaseModel):
         10.0, description="glass under the cavity; the drawing's stamp does not determine it"
     )
     glass_density_g_cm3: float = 2.5
+    punt_depth_mm: float | None = Field(
+        None, description="height of the dome in the base; None = find on the drawing, 0 = flat"
+    )
+    punt_diameter_mm: float | None = Field(None, description="dome diameter at the base line")
     spec: BottleSpec = Field(default_factory=BottleSpec)
 
     @classmethod
