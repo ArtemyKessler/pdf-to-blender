@@ -145,8 +145,12 @@ def find_vertical_axes(
     for g in groups:
         y0 = min(i[1] for i in g)
         y1 = max(i[2] for i in g)
-        # Either a path with a dash pattern, or a chain of at least a few separate dashes.
-        if y1 - y0 >= min_length_mm and (any(i[3] for i in g) or len(g) >= 3):
+        covered = sum(i[2] - i[1] for i in g)
+        # Either a path with a dash pattern, or a chain of separate dashes that covers most of
+        # its span (sheet-frame zone ticks at the top and bottom edges cover almost nothing).
+        dashed = any(i[3] for i in g)
+        chain = len(g) >= 3 and covered >= 0.5 * (y1 - y0)
+        if y1 - y0 >= min_length_mm and (dashed or chain):
             out.append((float(np.mean([i[0] for i in g])), y0, y1))
     out.sort(key=lambda t: t[2] - t[1], reverse=True)
     return out

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,9 +34,28 @@ class Contour:
 
     @property
     def base_diameter(self) -> float:
-        """Diameter of the flat standing surface (the bottom line of the outline)."""
-        bottom = self.rz[self.rz[:, 1] <= 1e-9]
-        return float(2 * bottom[:, 0].max())
+        """Diameter at the bottom of the body, where the heel rounding ends.
+
+        That is how bottle drawings dimension "base diameter" (e.g. Ø73.0 on the reference
+        sheet sits 5.7 mm above the bottom, at the heel's tangent point), not the contact ring.
+        Walking up from the bottom, it is the first point where the outline is almost vertical.
+        """
+        rz = self.rz[1:]  # skip the axis point
+        d = np.diff(rz, axis=0)
+        steep = (np.abs(d[:, 0]) <= 0.15 * np.abs(d[:, 1]) + 1e-9) & (d[:, 1] > 0)
+        # A straight body wall is one long edge: its lower end is exactly the tangent point.
+        long_ = steep & (np.hypot(d[:, 0], d[:, 1]) >= 5.0)
+        if long_.any():
+            i = int(np.argmax(long_))
+        else:  # curved body: the first almost vertical step is close enough
+            i = int(np.argmax(steep)) if steep.any() else 0
+        return float(2 * rz[i, 0])
+
+
+def in_bbox(s: Segment, bbox: tuple[float, float, float, float]) -> bool:
+    x0, y0, x1, y1 = bbox
+    bx0, by0, bx1, by1 = s.bbox
+    return bx0 >= x0 and bx1 <= x1 and by0 >= y0 and by1 <= y1
 
 
 def select_segments(
@@ -43,16 +63,111 @@ def select_segments(
     view_bbox: tuple[float, float, float, float],
     width_pt: float,
     width_tol_pt: float = 0.03,
+    bridge: bool = True,
 ) -> list[Segment]:
-    x0, y0, x1, y1 = view_bbox
-    out = []
+    """Contour-width lines of the view, plus thinner lines that close gaps between them.
+
+    Drafters do not always keep one line style: on the reference sheet the flat bottom and one
+    concave neck arc are drawn thin. Such pieces are found as the shortest chain of other
+    lines between two loose ends of the contour.
+    """
+    main, other = [], []
     for s in vectors.segments:
-        if s.dashed or abs(s.width_pt - width_pt) > width_tol_pt:
+        if s.dashed or not in_bbox(s, view_bbox):
             continue
-        bx0, by0, bx1, by1 = s.bbox
-        if bx0 >= x0 and bx1 <= x1 and by0 >= y0 and by1 <= y1:
-            out.append(s)
-    return out
+        (main if abs(s.width_pt - width_pt) <= width_tol_pt else other).append(s)
+    if bridge and main and other:
+        main = main + bridge_gaps(main, other)
+    return main
+
+
+def _ends(s: Segment) -> tuple[np.ndarray, np.ndarray]:
+    return s.pts[0], s.pts[-1]
+
+
+class _Snap:
+    """Merges points closer than `tol` into one node id."""
+
+    def __init__(self, tol: float) -> None:
+        self.tol = tol
+        self.cells: dict[tuple[int, int], list[tuple[np.ndarray, int]]] = {}
+        self.n = 0
+
+    def id(self, p: np.ndarray) -> int:
+        cx, cy = int(np.floor(p[0] / self.tol)), int(np.floor(p[1] / self.tol))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for q, i in self.cells.get((cx + dx, cy + dy), []):
+                    if np.hypot(*(p - q)) <= self.tol:
+                        return i
+        self.cells.setdefault((cx, cy), []).append((p, self.n))
+        self.n += 1
+        return self.n - 1
+
+
+def _length(s: Segment) -> float:
+    p = s.polyline()
+    return float(np.linalg.norm(np.diff(p, axis=0), axis=1).sum())
+
+
+def bridge_gaps(
+    main: list[Segment], other: list[Segment], tol: float = 0.1, max_detour: float = 1.5
+) -> list[Segment]:
+    snap = _Snap(tol)
+    degree: dict[int, int] = {}
+    pos: dict[int, np.ndarray] = {}
+    for s in main:
+        for p in _ends(s):
+            i = snap.id(p)
+            degree[i] = degree.get(i, 0) + 1
+            pos[i] = p
+    loose = {i for i, d in degree.items() if d == 1}
+    if len(loose) < 2:
+        return []
+
+    adj: dict[int, list[tuple[int, float, int]]] = {}
+    for k, s in enumerate(other):
+        a, b = (snap.id(p) for p in _ends(s))
+        if a == b:
+            continue
+        w = _length(s)
+        adj.setdefault(a, []).append((b, w, k))
+        adj.setdefault(b, []).append((a, w, k))
+
+    added: set[int] = set()
+    used: set[int] = set()
+    for start in sorted(loose):
+        if start in used or start not in adj:
+            continue
+        # Dijkstra over the thin lines until another loose end of the contour is reached.
+        dist = {start: 0.0}
+        prev: dict[int, tuple[int, int]] = {}
+        heap = [(0.0, start)]
+        goal = None
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > dist.get(u, np.inf):
+                continue
+            if u != start and u in loose and u not in used:
+                goal = u
+                break
+            for v, w, k in adj.get(u, []):
+                nd = d + w
+                if nd < dist.get(v, np.inf) and nd <= 200.0:
+                    dist[v] = nd
+                    prev[v] = (u, k)
+                    heapq.heappush(heap, (nd, v))
+        if goal is None:
+            continue
+        straight = float(np.hypot(*(pos[goal] - pos[start])))
+        if dist[goal] > max_detour * straight + 1.0:
+            continue
+        u = goal
+        while u != start:
+            u, k = prev[u]
+            added.add(k)
+        used.update((start, goal))
+    return [other[k] for k in sorted(added)]
 
 
 def _edges(segments: list[Segment]) -> np.ndarray:

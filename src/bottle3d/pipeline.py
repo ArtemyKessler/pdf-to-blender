@@ -7,10 +7,12 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from bottle3d import __version__
 from bottle3d.debug_plot import overlay_png
 from bottle3d.geometry.calibrate import Calibration, calibrate
-from bottle3d.geometry.contour import Contour, extract_contour, select_segments
+from bottle3d.geometry.contour import Contour, extract_contour, in_bbox, select_segments
 from bottle3d.geometry.wall import WallResult, solve_wall
 from bottle3d.pdf.vectors import PageVectors, extract, find_vertical_axes
 from bottle3d.spec.schema import Job
@@ -30,20 +32,51 @@ class Result:
         return "needs_review" if self.problems else "ok"
 
 
+def _seg_len(s) -> float:
+    p = s.polyline()
+    return float(np.linalg.norm(np.diff(p, axis=0), axis=1).sum())
+
+
 def _guess_contour_width(vectors: PageVectors, bbox) -> float:
-    x0, y0, x1, y1 = bbox
-    counts: dict[float, int] = {}
+    """The thickest line style that carries a good share of the drawn length in the view.
+
+    Counting segments would pick hatching and engraving (thousands of tiny thin pieces);
+    length favours long outline curves.
+    """
+    lengths: dict[float, float] = {}
     for s in vectors.segments:
-        bx0, by0, bx1, by1 = s.bbox
-        if s.dashed or not (bx0 >= x0 and bx1 <= x1 and by0 >= y0 and by1 <= y1):
+        if s.dashed or s.width_pt <= 0 or not in_bbox(s, bbox):
             continue
         w = round(s.width_pt, 2)
-        counts[w] = counts.get(w, 0) + 1
-    if not counts:
+        lengths[w] = lengths.get(w, 0.0) + _seg_len(s)
+    if not lengths:
         raise ValueError("в выбранной области нет линий")
-    top = max(counts.values())
-    # The outline is the thickest line style that is used a lot.
-    return max(w for w, c in counts.items() if c >= 0.1 * top)
+    top = max(lengths.values())
+    return max(w for w, length in lengths.items() if length >= 0.2 * top)
+
+
+def _view_bbox(vectors: PageVectors, axis, half_w: float) -> tuple[float, ...]:
+    """Box of the tallest group of lines around the axis.
+
+    Views often share an axis (FRONT above BOTTOM VIEW), so the axis span alone is not a view.
+    Lines that cross the axis area are grouped by height; a gap of more than 8 mm splits views.
+    """
+    x, ay0, ay1 = axis
+    box = (x - half_w, ay0 - 5, x + half_w, ay1 + 5)
+    width = _guess_contour_width(vectors, box)
+    spans = sorted(
+        (s.bbox[1], s.bbox[3])
+        for s in vectors.segments
+        if not s.dashed and abs(s.width_pt - width) <= 0.03 and in_bbox(s, box)
+    )
+    groups: list[list[float]] = []
+    for y0, y1 in spans:
+        if groups and y0 <= groups[-1][1] + 8.0:
+            groups[-1][1] = max(groups[-1][1], y1)
+        else:
+            groups.append([y0, y1])
+    y0, y1 = max(groups, key=lambda g: g[1] - g[0])
+    return tuple(round(v, 2) for v in (x - half_w, y0 - 3, x + half_w, y1 + 3))
 
 
 def resolve_job(vectors: PageVectors, job: Job) -> tuple[Job, list[str]]:
@@ -51,21 +84,20 @@ def resolve_job(vectors: PageVectors, job: Job) -> tuple[Job, list[str]]:
     they are listed so that the report (and the GUI) can ask a person to confirm them."""
     auto: list[str] = []
     j = job.model_copy(deep=True)
+    axes = find_vertical_axes(vectors)
     if j.axis_x_mm is None:
-        axes = find_vertical_axes(vectors)
         if not axes:
             raise ValueError("не найдена ось симметрии: задайте axis_x_mm в job.yaml")
         j.axis_x_mm = round(axes[0][0], 3)
         auto.append("axis_x_mm")
     if j.view_bbox_mm is None:
-        axes = find_vertical_axes(vectors)
-        mine = min(axes, key=lambda a: abs(a[0] - j.axis_x_mm))
+        if axes:
+            mine = min(axes, key=lambda a: abs(a[0] - j.axis_x_mm))
+        else:
+            mine = (j.axis_x_mm, 0.0, vectors.height_mm)
         others = [abs(a[0] - j.axis_x_mm) for a in axes if a is not mine]
-        half_w = min([*others, 300.0]) / 2
-        j.view_bbox_mm = tuple(
-            round(v, 2)
-            for v in (j.axis_x_mm - half_w, mine[1] - 5, j.axis_x_mm + half_w, mine[2] + 5)
-        )
+        half_w = min([o for o in others if o > 20] + [300.0]) / 2
+        j.view_bbox_mm = _view_bbox(vectors, mine, half_w)
         auto.append("view_bbox_mm")
     if j.contour_width_pt is None:
         j.contour_width_pt = _guess_contour_width(vectors, j.view_bbox_mm)
@@ -106,7 +138,7 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
     )
 
     problems = [*cal.problems, *wall.problems]
-    if contour.max_gap_mm > 0.05:
+    if contour.max_gap_mm > 0.1:
         problems.append(f"разрыв в контуре {contour.max_gap_mm:.2f} мм")
     if contour.symmetry_mm == contour.symmetry_mm and contour.symmetry_mm > 0.3:
         problems.append(

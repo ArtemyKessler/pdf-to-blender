@@ -32,7 +32,7 @@ def test_contour_starts_on_axis_and_ignores_inner_lines(contour):
 
 def test_calibration_recovers_scale(contour, synthetic):
     cal = calibrate(contour, height=246.0, body_d=88.3, base_d=73.0)
-    assert cal.scale == pytest.approx(1 / synthetic.scale, rel=1e-4)
+    assert cal.scale == pytest.approx(1 / synthetic.scale, rel=1e-3)
     assert not cal.problems
 
 

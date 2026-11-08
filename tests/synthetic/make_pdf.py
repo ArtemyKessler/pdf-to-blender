@@ -18,9 +18,9 @@ MM = 72.0 / 25.4
 # Half profile of a 246 mm whisky-like bottle in real mm, (r, z) from the base centre upward.
 # Each entry is a line ("l", end) or cubic Bezier ("c", c1, c2, end), starting at (0, 0).
 DEFAULT_PROFILE: list[tuple] = [
-    ("l", (36.5, 0.0)),
-    ("c", (41.0, 0.0), (44.15, 3.0), (44.15, 8.0)),  # heel
-    ("l", (44.15, 150.0)),
+    ("l", (31.0, 0.0)),
+    ("c", (34.5, 0.0), (36.5, 2.5), (36.5, 5.7)),  # heel; "base diameter" 73.0 is measured here
+    ("l", (44.15, 149.0)),  # tapered body up to Ø88.3
     ("c", (44.15, 185.0), (13.75, 175.0), (13.75, 205.0)),  # shoulder
     ("l", (13.75, 228.0)),
     ("l", (15.5, 230.0)),  # bead
