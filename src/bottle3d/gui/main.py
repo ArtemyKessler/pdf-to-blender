@@ -193,6 +193,7 @@ class MainWindow(QMainWindow):
         for key, label in SPEC_FIELDS:
             edit = QLineEdit()
             edit.setPlaceholderText("не указано")
+            edit.textEdited.connect(lambda _t, w=edit: (w.setStyleSheet(""), w.setToolTip("")))
             self.fields[key] = edit
             form.addRow(label, edit)
         self.colour = QComboBox()
@@ -297,20 +298,50 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             self.job = Job()
             self.append_log(f"Не удалось прочитать {saved.name}: {e}")
+
+        # Read the stamp and dimensions from the drawing; saved/typed values are kept.
+        filled: list[str] = []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.job, auto = pipeline.prefill(pdf, self.job)
+            filled = [a.removeprefix("spec.") for a in auto if a.startswith("spec.")]
+        except Exception as e:  # noqa: BLE001 — the form stays editable by hand
+            self.append_log(f"Не удалось прочитать данные с чертежа: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
         self.fill_form(self.job)
+        self.mark_filled(filled)
         self.drop.setText(pdf.name)
         self.build_btn.setEnabled(True)
         self.contour_view.show_file(None)
         self.render_view.show_file(None)
         self.report.clear()
-        hint = (
-            "Настройки загружены из " + saved.name
-            if saved.exists()
-            else (
-                "Заполните размеры со штампа: без общей высоты или диаметров масштаб не определить."
+        self.status.setStyleSheet("")
+        parts = []
+        if saved.exists():
+            parts.append("Настройки загружены из " + saved.name + ".")
+        if filled:
+            parts.append(
+                f"С чертежа прочитано полей: {len(filled)} (выделены рамкой). Сверьте со штампом."
             )
-        )
-        self.status.setText(hint)
+        missing = [label for key, label in SPEC_FIELDS if not self.fields[key].text()]
+        if missing:
+            parts.append("Не найдено: " + ", ".join(m.split(",")[0] for m in missing) + ".")
+        self.status.setText(" ".join(parts))
+
+    def mark_filled(self, keys: list[str]) -> None:
+        """Frame the fields that were read from the drawing until the person edits them."""
+        style = "border: 1px solid #d4a017; border-radius: 3px;"
+        tip = "Прочитано с чертежа автоматически"
+        widgets = {**self.fields, "name": self.name}
+        for key, w in widgets.items():
+            on = key in keys
+            w.setStyleSheet(style if on else "")
+            w.setToolTip(tip if on else "")
+        on = "glass_colour" in keys
+        self.colour.setStyleSheet(style if on else "")
+        self.colour.setToolTip(tip if on else "")
 
     def fill_form(self, job: Job) -> None:
         sp = job.spec
