@@ -25,7 +25,8 @@ class Result:
     calibration: Calibration
     wall: WallResult
     auto: list[str] = field(default_factory=list)  # which job fields were guessed
-    problems: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)  # measurable mismatches → needs_review
+    notes: list[str] = field(default_factory=list)  # always-true limitations and reminders
 
     @property
     def status(self) -> str:
@@ -145,10 +146,11 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
             f"левая и правая половины вида расходятся в среднем на {contour.symmetry_mm:.2f} мм:"
             " тара может быть неосесимметричной"
         )
+    notes = []
     if auto:
-        problems.append("определено автоматически, проверьте по картинке: " + ", ".join(auto))
-    problems.append("дно плоское (пунт не моделируется)")
-    result = Result(job, contour, cal, wall, auto, problems)
+        notes.append("определено автоматически, проверьте контур на картинке: " + ", ".join(auto))
+    notes.append("не моделируется: пунт (вогнутость дна), гравировка, пупырышки, dot code")
+    result = Result(job, contour, cal, wall, auto, problems, notes)
 
     _write_profile(result, pdf, out / "profile.json")
     _write_report(result, pdf, out)
@@ -218,6 +220,7 @@ def _write_report(r: Result, pdf: Path, out: Path) -> None:
         "checks": [{"name": n, "drawing": d, "model": m} for n, d, m in rows],
         "auto_detected": r.auto,
         "problems": r.problems,
+        "notes": r.notes,
     }
     (out / "report.json").write_text(
         json.dumps(_nan_to_none(data), indent=1, ensure_ascii=False),
@@ -246,6 +249,9 @@ def _write_report(r: Result, pdf: Path, out: Path) -> None:
         "",
         "## Требует внимания" if r.problems else "",
         *[f"- {p}" for p in r.problems],
+        "",
+        "## Заметки",
+        *[f"- {n}" for n in r.notes],
         "",
     ]
     (out / "report.md").write_text("\n".join(lines), encoding="utf-8")
