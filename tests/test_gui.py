@@ -136,3 +136,24 @@ def test_corrections_are_saved_next_to_the_drawing(window, tmp_path, monkeypatch
     window.load_pdf(pdf)
     assert window.job.axis_x_mm == 117.18
     assert "axis_x_mm" in window.manual_geo
+
+
+def test_punt_is_filled_and_can_be_switched_off(window, tmp_path):
+    pdf = tmp_path / "b.pdf"
+    pdf.write_bytes(PDF.read_bytes())
+    window.load_pdf(pdf)
+    assert window.punt_depth.value() == pytest.approx(20, abs=0.6)
+    assert window.punt_dia.value() == pytest.approx(46, abs=2)
+    assert "d4a017" in window.punt_depth.styleSheet()  # framed: found automatically
+    assert not window.drawing._punt.path().isEmpty()
+
+    window.punt_depth.setValue(0)
+    assert window.manual_punt and window.job.punt_depth_mm == 0
+    assert window.punt_depth.styleSheet() == ""
+    assert window.drawing._punt.path().isEmpty()
+    # A re-analysis (another line width) keeps what the person typed...
+    window.on_width_chosen(window.width_box.currentIndex())
+    assert window.punt_depth.value() == 0
+    # ...and "Reset" goes back to what the drawing shows.
+    window.reset_geometry()
+    assert window.punt_depth.value() == pytest.approx(20, abs=0.6)

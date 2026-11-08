@@ -48,14 +48,20 @@ def _half_width(region, z: float) -> float:
     return max(abs(x) for x in (cut.bounds[0], cut.bounds[2]))
 
 
-def cavity(outer: Polygon, t: float, base_t: float, bore_r: float | None) -> Polygon:
+def cavity(
+    outer: Polygon, t: float, base_t: float, bore_r: float | None, bottom: LineString | None = None
+) -> Polygon:
     """Inside of the bottle for side wall `t`, base `base_t` and neck bore radius `bore_r`.
 
     The offset cavity is used from the base up to the height where it first narrows to the
     bore; above that the neck is a straight bore up through the rim.
     """
     _, _, _, h = outer.bounds
-    off = outer.buffer(-t, join_style="mitre").intersection(box(-BIG, base_t, BIG, BIG))
+    off = outer.buffer(-t, join_style="mitre")
+    if bottom is None:  # flat base
+        off = off.intersection(box(-BIG, base_t, BIG, BIG))
+    else:  # the inside of the base follows the punt at `base_t`
+        off = off.difference(bottom.buffer(base_t))
     if off.is_empty:
         return Polygon()
     if bore_r is None:
@@ -130,8 +136,15 @@ def solve_wall(
     nominal_ml: float | None = None,
     fill_height_mm: float | None = None,
     default_t: float = 3.0,
+    bottom_rz: np.ndarray | None = None,
 ) -> WallResult:
+    """`bottom_rz`: the outer base surface (r, z) from the axis outwards when it is not flat
+    (a punt); the inside of the base then follows it at `base_t`."""
     outer = outer_section(outer_rz)
+    bottom = None
+    if bottom_rz is not None:
+        full = np.vstack([bottom_rz[::-1] * [-1, 1], bottom_rz[1:]])
+        bottom = LineString(full)
     h = outer.bounds[3]
     bore_r = bore_d / 2 if bore_d else None
     v_outer = revolve_volume_cm3(outer)
@@ -139,7 +152,7 @@ def solve_wall(
     target = glass_weight_g / density if glass_weight_g else None
 
     def glass_v(t: float) -> float:
-        return v_outer - revolve_volume_cm3(cavity(outer, t, base_t, bore_r))
+        return v_outer - revolve_volume_cm3(cavity(outer, t, base_t, bore_r, bottom))
 
     if target is None:
         t = default_t
@@ -163,7 +176,7 @@ def solve_wall(
         if not 1.0 <= t <= 8.0:
             problems.append(f"толщина стенки {t:.2f} мм вне разумного диапазона 1–8 мм")
 
-    cav = cavity(outer, t, base_t, bore_r)
+    cav = cavity(outer, t, base_t, bore_r, bottom)
     glass = outer.difference(cav)
     v_cav = revolve_volume_cm3(cav)
     v_glass = v_outer - v_cav
@@ -184,8 +197,8 @@ def solve_wall(
         if abs(rel) > 0.02:
             problems.append(
                 f"объём до уровня налива {v_fill:.0f} мл против номинала {nominal_ml:.0f} "
-                f"({rel * 100:+.1f} %): возможно, у дна есть пунт (вогнутость), который пока не "
-                "моделируется, или внутренний профиль не сходится с чертежом"
+                f"({rel * 100:+.1f} %): проверьте толщину дна и пунт (вогнутость дна), "
+                "или внутренний профиль не сходится с чертежом"
             )
 
     return WallResult(

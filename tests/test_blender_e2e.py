@@ -49,3 +49,17 @@ def test_mesh_dimensions_manifold_and_volume(synthetic, tmp_path):
     # Positive and equal to the glass volume: normals point outwards, cavity is hollow.
     assert stats["volume_cm3"] == pytest.approx(r.wall.v_glass, rel=0.01)
     assert (tmp_path / "model.blend").exists()
+
+
+def test_mesh_with_punt_is_manifold(synthetic, tmp_path):
+    spec = BottleSpec(
+        overall_height_mm=246.0,
+        body_diameter_mm=88.3,
+        glass_weight_g=500,
+        neck_inner_diameter_mm=18.7,
+    )
+    job = Job(spec=spec, punt_depth_mm=15, punt_diameter_mm=40)
+    r = pipeline.run(synthetic.path, job, tmp_path)
+    stats = _build(tmp_path / "profile.json", tmp_path)
+    assert stats["non_manifold_edges"] == 0
+    assert stats["volume_cm3"] == pytest.approx(r.wall.v_glass, rel=0.01)

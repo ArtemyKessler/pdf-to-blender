@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from bottle3d.geometry.contour import Contour
+from bottle3d.geometry.punt import punt_profile
 
 DPI = 110
 PX_PER_MM = DPI / 25.4
@@ -50,6 +51,10 @@ class DrawingView(QGraphicsView):
         self._contour.setPen(self._pen(QColor(230, 0, 0), 2.5))
         self._contour.setZValue(3)
         self.scene().addItem(self._contour)
+        self._punt = QGraphicsPathItem()
+        self._punt.setPen(self._pen(QColor(255, 140, 0), 2.0, dashed=True))
+        self._punt.setZValue(3)
+        self.scene().addItem(self._punt)
         self._rubber: QGraphicsRectItem | None = None
         self._drag_start: QPointF | None = None
         self._fitted = False
@@ -106,8 +111,13 @@ class DrawingView(QGraphicsView):
         self._fitted = False
 
     def show_analysis(
-        self, axis_x: float | None, bbox: tuple | None, contour: Contour | None
+        self,
+        axis_x: float | None,
+        bbox: tuple | None,
+        contour: Contour | None,
+        punt: tuple[float, float] | None = None,
     ) -> None:
+        """`punt`: (depth, diameter) in sheet mm, drawn as a dashed dome over the contour base."""
         if bbox:
             x0, y0, x1, y1 = bbox
             self._box.setRect(QRectF(self.to_scene(x0, y1), self.to_scene(x1, y0)))
@@ -129,6 +139,14 @@ class DrawingView(QGraphicsView):
             for p in pts[1:]:
                 path.lineTo(self.to_scene(*p))
         self._contour.setPath(path)
+        punt_path = QPainterPath()
+        if contour is not None and punt and punt[0] > 0 and punt[1] > 0:
+            half = punt_profile(*punt)
+            pts = np.vstack([half * [-1, 1], half[::-1]]) + [contour.axis_x, contour.base_y]
+            punt_path.moveTo(self.to_scene(*pts[0]))
+            for p in pts[1:]:
+                punt_path.lineTo(self.to_scene(*p))
+        self._punt.setPath(punt_path)
         if bbox and not self._fitted:
             self.zoom_to(bbox)
             self._fitted = True

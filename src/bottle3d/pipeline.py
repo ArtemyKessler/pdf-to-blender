@@ -13,6 +13,7 @@ from bottle3d import __version__
 from bottle3d.debug_plot import overlay_png
 from bottle3d.geometry.calibrate import Calibration, calibrate
 from bottle3d.geometry.contour import Contour, extract_contour, in_bbox, select_segments
+from bottle3d.geometry.punt import FLAT_TOL, apply_punt, detect_punt
 from bottle3d.geometry.wall import WallResult, solve_wall
 from bottle3d.pdf.vectors import PageVectors, extract, find_vertical_axes
 from bottle3d.spec.extract_rules import read_dimensions, read_lines, read_stamp
@@ -151,6 +152,20 @@ def analyze(
         if missing:
             job = job.model_copy(update={"spec": job.spec.model_copy(update=missing)})
             auto += [f"spec.{k}" for k in missing]
+    if job.punt_depth_mm is None:
+        found_punt = detect_punt(vectors, job.contour_width_pt)
+        if found_punt is not None:
+            # Real size: the scale is not calibrated yet, use the height ratio when known.
+            h = job.spec.overall_height_mm
+            k = h / contour.height if h else 1.0
+            job = job.model_copy(
+                update={
+                    "punt_depth_mm": round(found_punt.depth * k, 1),
+                    "punt_diameter_mm": round(found_punt.diameter * k, 1),
+                }
+            )
+            auto.append("punt")
+
     return Analysis(job, auto, vectors, contour)
 
 
@@ -186,8 +201,15 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
         base_d=sp.base_diameter_mm,
     )
     k = cal.scale
+    outer_rz = contour.rz * k
+    bottom_rz = None
+    if job.punt_depth_mm and job.punt_diameter_mm:
+        outer_rz = apply_punt(outer_rz, job.punt_depth_mm, job.punt_diameter_mm)
+        last_flat = int(np.nonzero(np.abs(outer_rz[:, 1]) < FLAT_TOL)[0].max())
+        bottom_rz = outer_rz[: last_flat + 1]
     wall = solve_wall(
-        contour.rz * k,
+        outer_rz,
+        bottom_rz=bottom_rz,
         glass_weight_g=sp.glass_weight_g,
         density=job.glass_density_g_cm3,
         base_t=job.base_thickness_mm,
@@ -215,7 +237,14 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
             )
         if spec:
             notes.append("прочитано с чертежа, сверьте со штампом: " + ", ".join(spec))
-    notes.append("не моделируется: пунт (вогнутость дна), гравировка, пупырышки, dot code")
+    if job.punt_depth_mm and job.punt_diameter_mm:
+        how = "найден на чертеже" if "punt" in auto else "задан"
+        notes.append(
+            f"пунт {how}: глубина {job.punt_depth_mm:.1f} мм, Ø {job.punt_diameter_mm:.1f} мм"
+        )
+    else:
+        notes.append("дно плоское: пунт на чертеже не найден и не задан")
+    notes.append("не моделируется: гравировка, пупырышки, dot code")
     result = Result(job, contour, cal, wall, auto, problems, notes)
 
     _write_profile(result, pdf, out / "profile.json")

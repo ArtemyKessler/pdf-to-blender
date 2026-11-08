@@ -177,6 +177,8 @@ class MainWindow(QMainWindow):
         self.analysis: pipeline.Analysis | None = None
         self.auto_spec: set[str] = set()  # fields read from the drawing and not edited since
         self.manual_geo: set[str] = set()  # axis / view / width set by the person
+        self.manual_punt = False  # punt depth/diameter typed by the person
+        self._filling = False
         self._thread: QThread | None = None
         self._worker: Worker | None = None
 
@@ -212,6 +214,23 @@ class MainWindow(QMainWindow):
         self.base_t.setValue(10)
         self.base_t.setToolTip("Из штампа не определяется. У тяжёлых бутылок под виски 8–15 мм.")
         form.addRow("Толщина дна", self.base_t)
+        self.punt_depth = QDoubleSpinBox()
+        self.punt_depth.setRange(0, 60)
+        self.punt_depth.setDecimals(1)
+        self.punt_depth.setSuffix(" мм")
+        self.punt_depth.setSpecialValueText("нет (плоское дно)")
+        self.punt_depth.setToolTip(
+            "Вогнутость дна. Ищется на чертеже как пунктирный купол над дном; 0 — плоское дно."
+        )
+        self.punt_dia = QDoubleSpinBox()
+        self.punt_dia.setRange(0, 200)
+        self.punt_dia.setDecimals(1)
+        self.punt_dia.setSuffix(" мм")
+        self.punt_dia.setToolTip("Диаметр пунта там, где купол встречается с дном.")
+        for w in (self.punt_depth, self.punt_dia):
+            w.valueChanged.connect(self.on_punt_edited)
+        form.addRow("Пунт: глубина", self.punt_depth)
+        form.addRow("Пунт: диаметр", self.punt_dia)
         spec_box = QGroupBox("Данные со штампа и размеры")
         spec_box.setLayout(form)
 
@@ -351,6 +370,7 @@ class MainWindow(QMainWindow):
         self.manual_geo = {
             k for k in ("axis_x_mm", "view_bbox_mm", "contour_width_pt") if getattr(self.job, k)
         }
+        self.manual_punt = self.job.punt_depth_mm is not None
         self.analysis = None
         self.auto_spec = set()
 
@@ -406,7 +426,8 @@ class MainWindow(QMainWindow):
             if k not in self.manual_geo
         }
         spec = {k: None for k in self.auto_spec}
-        job = job.model_copy(update={**geo, "spec": job.spec.model_copy(update=spec)})
+        punt = {} if self.manual_punt else {"punt_depth_mm": None, "punt_diameter_mm": None}
+        job = job.model_copy(update={**geo, **punt, "spec": job.spec.model_copy(update=spec)})
         try:
             a = pipeline.analyze(self.pdf, job, vectors=vectors, read_spec=read_spec)
         except Exception as e:  # noqa: BLE001
@@ -418,7 +439,9 @@ class MainWindow(QMainWindow):
         self.analysis = a
         self.job = a.job
         self.auto_spec = {x.removeprefix("spec.") for x in a.auto if x.startswith("spec.")}
-        self.drawing.show_analysis(a.job.axis_x_mm, a.job.view_bbox_mm, a.contour)
+        self.drawing.show_analysis(
+            a.job.axis_x_mm, a.job.view_bbox_mm, a.contour, self.punt_on_sheet(a.job, a.contour)
+        )
         self.update_width_box()
         self.update_contour_info()
         self.after_reanalyze_form()
@@ -503,6 +526,7 @@ class MainWindow(QMainWindow):
 
     def reset_geometry(self) -> None:
         self.manual_geo.clear()
+        self.manual_punt = False
         self.job = self.job.model_copy(
             update={"axis_x_mm": None, "view_bbox_mm": None, "contour_width_pt": None}
         )
@@ -515,7 +539,45 @@ class MainWindow(QMainWindow):
             if key in self.fields:
                 v = getattr(self.job.spec, key)
                 self.fields[key].setText("" if v is None else f"{v:g}")
+        if not self.manual_punt:
+            self.set_punt_fields(self.job)
         self.mark_filled(sorted(self.auto_spec))
+
+    @staticmethod
+    def punt_on_sheet(job: Job, contour) -> tuple[float, float] | None:
+        """Punt size in sheet mm, for drawing it over the main view."""
+        if not (job.punt_depth_mm and job.punt_diameter_mm):
+            return None
+        h = job.spec.overall_height_mm
+        k = h / contour.height if h and contour.height else 1.0
+        return job.punt_depth_mm / k, job.punt_diameter_mm / k
+
+    def set_punt_fields(self, job: Job) -> None:
+        self._filling = True
+        self.punt_depth.setValue(job.punt_depth_mm or 0)
+        self.punt_dia.setValue(job.punt_diameter_mm or 0)
+        self._filling = False
+
+    def on_punt_edited(self, _v: float) -> None:
+        if self._filling:
+            return
+        self.manual_punt = True
+        self.job = self.job.model_copy(
+            update={
+                "punt_depth_mm": self.punt_depth.value(),
+                "punt_diameter_mm": self.punt_dia.value() or None,
+            }
+        )
+        for w in (self.punt_depth, self.punt_dia):
+            w.setStyleSheet("")
+            w.setToolTip("")
+        if self.analysis is not None:
+            self.drawing.show_analysis(
+                self.job.axis_x_mm,
+                self.job.view_bbox_mm,
+                self.analysis.contour,
+                self.punt_on_sheet(self.job, self.analysis.contour),
+            )
 
     def unmark(self, key: str) -> None:
         self.auto_spec.discard(key)
@@ -536,6 +598,10 @@ class MainWindow(QMainWindow):
         on = "glass_colour" in keys
         self.colour.setStyleSheet(style if on else "")
         self.colour.setToolTip(tip if on else "")
+        on = not self.manual_punt and bool(self.job.punt_depth_mm)
+        for w in (self.punt_depth, self.punt_dia):
+            w.setStyleSheet(style if on else "")
+            w.setToolTip("Пунт найден на чертеже (оранжевый пунктир на контуре)" if on else "")
 
     def fill_form(self, job: Job) -> None:
         sp = job.spec
@@ -545,6 +611,7 @@ class MainWindow(QMainWindow):
             edit.setText("" if v is None else f"{v:g}")
         self.colour.setCurrentText(sp.glass_colour or "Flint")
         self.base_t.setValue(job.base_thickness_mm)
+        self.set_punt_fields(job)
 
     def read_form(self) -> Job:
         values: dict[str, object] = {"name": self.name.text().strip() or None}
@@ -629,7 +696,12 @@ class MainWindow(QMainWindow):
         self.result = result
         self.job = result.job  # keep auto-detected axis/view so a re-run reproduces them
         assert self.out is not None
-        self.drawing.show_analysis(result.job.axis_x_mm, result.job.view_bbox_mm, result.contour)
+        self.drawing.show_analysis(
+            result.job.axis_x_mm,
+            result.job.view_bbox_mm,
+            result.contour,
+            self.punt_on_sheet(result.job, result.contour),
+        )
         has_render = (self.out / "preview.png").exists()
         self.render_view.show_file(self.out / "preview.png" if has_render else None)
         self.report.setMarkdown((self.out / "report.md").read_text(encoding="utf-8"))
