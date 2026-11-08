@@ -84,3 +84,24 @@ def test_flat_base_when_punt_is_switched_off(tmp_path):
     assert "punt" not in r.auto
     assert r.wall.section[0, 1] == pytest.approx(10)
     assert r.wall.v_outer > 935  # the ~20 ml of the dome is back
+
+
+def test_engravings_are_found_and_placed(result):
+    by_side = {e.angle_deg: e for e in result.engravings}
+    assert set(by_side) == {-90.0, 180.0}
+    mono, text = by_side[-90.0], by_side[180.0]  # front view, left view
+    # Developed outlines: monogram ~20 × 20 mm (5:1), "RISE & SHINE" ~60 × 9 mm (2:1).
+    assert mono.size == pytest.approx((20.4, 20.5), abs=0.5)
+    assert text.size == pytest.approx((61.6, 9.3), abs=0.5)
+    assert len(text.shape.geoms) == 10  # letters
+    # Both on the shoulder, 0.6 mm high.
+    for e in (mono, text):
+        assert 150 < e.z_center < 170
+        assert e.relief_mm == 0.6
+    assert sum("гравировка" in n and "мм" in n for n in result.notes) == 2
+
+
+def test_engraving_can_be_switched_off(tmp_path):
+    r = pipeline.run(PDF, Job(spec=SPEC, engraving=False), tmp_path)
+    assert r.engravings == []
+    assert any("не моделируется: гравировка" in n for n in r.notes)

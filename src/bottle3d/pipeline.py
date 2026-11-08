@@ -13,6 +13,7 @@ from bottle3d import __version__
 from bottle3d.debug_plot import overlay_png
 from bottle3d.geometry.calibrate import Calibration, calibrate
 from bottle3d.geometry.contour import Contour, extract_contour, in_bbox, select_segments
+from bottle3d.geometry.engraving import Engraving, detect_engravings, flat_mesh
 from bottle3d.geometry.punt import FLAT_TOL, apply_punt, detect_punt
 from bottle3d.geometry.wall import WallResult, solve_wall
 from bottle3d.pdf.vectors import PageVectors, extract, find_vertical_axes
@@ -29,6 +30,7 @@ class Result:
     auto: list[str] = field(default_factory=list)  # which job fields were guessed
     problems: list[str] = field(default_factory=list)  # measurable mismatches → needs_review
     notes: list[str] = field(default_factory=list)  # always-true limitations and reminders
+    engravings: list[Engraving] = field(default_factory=list)  # z_center in real mm
 
     @property
     def status(self) -> str:
@@ -219,6 +221,15 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
         fill_height_mm=sp.fill_height_mm,
     )
 
+    engravings = []
+    if job.engraving:
+        found = detect_engravings(
+            vectors, read_lines(pdf, job.page), job.contour_width_pt, job.axis_x_mm, contour.base_y
+        )
+        for e in found:
+            e.z_center *= k
+        engravings = found
+
     problems = [*cal.problems, *wall.problems]
     if contour.max_gap_mm > 0.1:
         problems.append(f"разрыв в контуре {contour.max_gap_mm:.2f} мм")
@@ -244,8 +255,17 @@ def run(pdf: str | Path, job: Job, out_dir: str | Path) -> Result:
         )
     else:
         notes.append("дно плоское: пунт на чертеже не найден и не задан")
-    notes.append("не моделируется: гравировка, пупырышки, dot code")
-    result = Result(job, contour, cal, wall, auto, problems, notes)
+    side = {-90.0: "спереди", 180.0: "слева", 0.0: "справа"}
+    for e in engravings:
+        w, h = e.size
+        notes.append(
+            f"гравировка {w:.0f}×{h:.0f} мм, выпуклость {e.relief_mm:g} мм, "
+            f"{side.get(e.angle_deg, '')} на высоте {e.z_center:.0f} мм"
+        )
+    notes.append(
+        "не моделируется: " + ("" if engravings else "гравировка, ") + "пупырышки, dot code"
+    )
+    result = Result(job, contour, cal, wall, auto, problems, notes, engravings)
 
     _write_profile(result, pdf, out / "profile.json")
     _write_report(result, pdf, out)
@@ -264,6 +284,12 @@ def _write_profile(r: Result, pdf: Path, path: Path) -> None:
         "units": "m",
         "section": [[round(x / 1000, 7), round(z / 1000, 7)] for x, z in r.wall.section],
         "material": {"glass_colour": r.job.spec.glass_colour or "Flint"},
+        # Outer side of the bottle (r, z), for wrapping engravings onto it.
+        "outer_side": [
+            [round(x / 1000, 7), round(z / 1000, 7)]
+            for x, z in r.contour.rz[1:] * r.calibration.scale
+        ],
+        "engravings": [_engraving_json(e) for e in r.engravings],
         "meta": {
             "source_pdf": pdf.name,
             "pdf_sha256": _sha256(pdf),
@@ -273,6 +299,17 @@ def _write_profile(r: Result, pdf: Path, path: Path) -> None:
         },
     }
     path.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def _engraving_json(e: Engraving) -> dict:
+    verts, faces = flat_mesh(e.shape)
+    return {
+        "verts": np.round(verts / 1000, 8).tolist(),  # (u, v) m: around the bottle, up its side
+        "faces": faces.tolist(),
+        "angle_deg": e.angle_deg,
+        "z_center": round(e.z_center / 1000, 7),
+        "relief": e.relief_mm / 1000,
+    }
 
 
 def _rows(r: Result) -> list[tuple[str, float | None, float]]:

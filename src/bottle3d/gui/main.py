@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -231,6 +232,12 @@ class MainWindow(QMainWindow):
             w.valueChanged.connect(self.on_punt_edited)
         form.addRow("Пунт: глубина", self.punt_depth)
         form.addRow("Пунт: диаметр", self.punt_dia)
+        self.engraving = QCheckBox("выпуклые надписи и логотип с чертежа")
+        self.engraving.setChecked(True)
+        self.engraving.setToolTip(
+            "Ищется развёртка гравировки («Developed engraving») и её место на виде сбоку."
+        )
+        form.addRow("Гравировка", self.engraving)
         spec_box = QGroupBox("Данные со штампа и размеры")
         spec_box.setLayout(form)
 
@@ -612,6 +619,7 @@ class MainWindow(QMainWindow):
         self.colour.setCurrentText(sp.glass_colour or "Flint")
         self.base_t.setValue(job.base_thickness_mm)
         self.set_punt_fields(job)
+        self.engraving.setChecked(job.engraving)
 
     def read_form(self) -> Job:
         values: dict[str, object] = {"name": self.name.text().strip() or None}
@@ -630,6 +638,7 @@ class MainWindow(QMainWindow):
             update={
                 "spec": BottleSpec.model_validate(spec.model_dump()),
                 "base_thickness_mm": self.base_t.value(),
+                "engraving": self.engraving.isChecked(),
             }
         )
 
