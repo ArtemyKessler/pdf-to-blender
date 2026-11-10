@@ -72,5 +72,8 @@ def test_reference_with_punt_and_engravings(tmp_path):
     stats = _build(tmp_path / "profile.json", tmp_path)
     assert stats["engravings"] == 2
     assert stats["non_manifold_edges"] == 0
+    # Blender 5.1+ leaves an empty material slot after the boolean union: every face must
+    # still be glass, or the bottle renders opaque white.
+    assert stats["faces_without_material"] == 0
     # The lettering adds well under 1 cm³ of glass.
     assert r.wall.v_glass < stats["volume_cm3"] < r.wall.v_glass + 1

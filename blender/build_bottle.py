@@ -150,6 +150,19 @@ def add_engravings(bottle: bpy.types.Object, profile: dict) -> int:
     return n
 
 
+def set_material(obj: bpy.types.Object, mat: bpy.types.Material) -> None:
+    """Make `mat` the only material of every face.
+
+    Since Blender 5.1 the boolean union leaves an empty material slot from the engraving
+    object, and all faces point at it: appending the glass after that leaves the bottle
+    without glass (opaque white in the render).
+    """
+    obj.data.materials.clear()
+    obj.data.materials.append(mat)
+    for p in obj.data.polygons:
+        p.material_index = 0
+
+
 def mesh_stats(obj: bpy.types.Object) -> dict:
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -163,6 +176,13 @@ def mesh_stats(obj: bpy.types.Object) -> dict:
         "non_manifold_edges": non_manifold,
         "volume_cm3": volume * 1e6,
         "faces": len(obj.data.polygons),
+        # Faces whose slot has no material render as plain white instead of glass.
+        "faces_without_material": sum(
+            1
+            for p in obj.data.polygons
+            if p.material_index >= len(obj.material_slots)
+            or obj.material_slots[p.material_index].material is None
+        ),
     }
 
 
@@ -265,7 +285,7 @@ def build(
     scene = reset_scene()
     obj = build_mesh(profile["section"])
     n_engr = add_engravings(obj, profile)
-    obj.data.materials.append(glass_material(profile.get("material", {}).get("glass_colour")))
+    set_material(obj, glass_material(profile.get("material", {}).get("glass_colour")))
     stats = mesh_stats(obj)
     stats["engravings"] = n_engr
     (out_dir / "blender_stats.json").write_text(json.dumps(stats, indent=1), encoding="utf-8")
